@@ -3,6 +3,7 @@ import { Command } from "commander";
 import { getAuthorizedClient } from "../core/auth.js";
 import { scanFolder } from "../core/scanner.js";
 import { planZipParts } from "../core/binpacker.js";
+import { CloudDownloader } from "../core/downloader.js";
 
 const program = new Command();
 
@@ -77,9 +78,40 @@ program
   .requiredOption("-f, --folder-id <id>", "Google Drive folder ID to download")
   .requiredOption("-o, --output <dir>", "Destination directory for ZIP parts")
   .option("-s, --split-size <mb>", "Max size per ZIP part, in MB", "4000")
-  .action(() => {
-    console.error("Not implemented yet — see Step 3");
-    process.exitCode = 1;
+  .action(async (opts: { folderId: string; output: string; splitSize: string }) => {
+    const client = await getAuthorizedClient();
+    const { files, errors } = await scanFolder(opts.folderId, client);
+    for (const err of errors) {
+      console.log(`warning: ${err.message}`);
+    }
+
+    const splitSizeBytes = Number(opts.splitSize) * 1024 * 1024;
+    const downloader = new CloudDownloader(client, {
+      splitSizeBytes,
+      destinationDir: opts.output,
+    });
+
+    downloader.on("plan:complete", ({ partCount }) => {
+      console.log(`Planned ${partCount} part(s)`);
+    });
+    downloader.on("part:start", ({ partIndex, totalParts }) => {
+      console.log(`\nPart ${partIndex}/${totalParts}: starting`);
+    });
+    downloader.on("file:start", ({ name }) => {
+      process.stdout.write(`  ${name} ... `);
+    });
+    downloader.on("file:complete", () => {
+      process.stdout.write("done\n");
+    });
+    downloader.on("file:warning", ({ message }) => {
+      console.log(`  ! ${message}`);
+    });
+    downloader.on("part:complete", ({ partIndex, sizeBytes, outputPath }) => {
+      console.log(`Part ${partIndex} complete: ${(sizeBytes / 1024 / 1024).toFixed(2)} MB -> ${outputPath}`);
+    });
+
+    await downloader.run(files);
+    console.log("\nDownload complete.");
   });
 
 program.parseAsync().catch((err) => {
