@@ -1,0 +1,39 @@
+{
+  "name": "split-down",
+  "version": "0.1.0",
+  "description": "CloudSplitter: stream large Google Drive/OneDrive folders directly to disk as split ZIP parts, with zero temporary storage.",
+  "type": "module",
+  "main": "dist/cli/index.js",
+  "bin": {
+    "cloudsplitter": "dist/cli/index.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli/index.ts",
+    "start": "node dist/cli/index.js",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "downloading",
+    "tool",
+    "google-drive",
+    "zip",
+    "streaming"
+  ],
+  "author": "Alex Yoo",
+  "license": "MIT",
+  "dependencies": {
+    "archiver": "^7.0.1",
+    "commander": "^13.1.0",
+    "dotenv": "^16.4.7",
+    "express": "^5.2.1",
+    "googleapis": "^144.0.0"
+  },
+  "devDependencies": {
+    "@types/archiver": "^6.0.3",
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.10.5",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.3"
+  }
+}
