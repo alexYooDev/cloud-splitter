@@ -8,14 +8,14 @@ Downloading a 50GB+ folder through the native Drive web UI often fails to zip, o
 
 ## Status
 
-Early scaffold. Auth, folder scanning, and split planning are implemented and testable via the CLI. The actual streaming download engine (`download` command) is not implemented yet.
+Auth, folder scanning, split planning, and the streaming download engine are all implemented and covered by unit tests.
 
 | Command | Status |
 |---|---|
 | `auth` | ✅ working |
 | `scan` | ✅ working |
 | `plan` | ✅ working |
-| `download` | 🚧 not implemented |
+| `download` | ✅ working |
 
 ## Setup
 
@@ -47,7 +47,8 @@ npm run dev -- scan -f <folder-id>
 # Preview how a folder would be split into ZIP parts, without downloading
 npm run dev -- plan -f <folder-id> -s 4000
 
-# Not implemented yet
+# Stream the folder down as split ZIP parts (resumable — rerun to pick up
+# where a failed download left off)
 npm run dev -- download -f <folder-id> -o ./downloads -s 4000
 ```
 
@@ -63,7 +64,8 @@ src/
     auth.ts        # Google OAuth 2.0 (Express-based localhost redirect)
     scanner.ts      # Recursive Drive folder walk -> flat file list
     binpacker.ts    # Sequential bin-packing into size-bounded ZIP parts
-    downloader.ts   # Streaming download + ZIP-split engine (stub)
+    downloader.ts   # Streaming download + ZIP-split engine
+    *.test.ts       # Vitest unit tests, colocated with the module they cover
   cli/
     index.ts        # commander entry point
 ```
@@ -74,4 +76,10 @@ src/
 npm run typecheck   # tsc --noEmit
 npm run build        # compile to dist/
 npm run dev          # run the CLI from source via tsx
+npm test             # run the unit test suite once
+npm run test:watch   # run tests in watch mode
 ```
+
+## Testing
+
+Unit tests mock the Google API client (`vi.mock("googleapis")`) so they run offline, with no real Drive folder or OAuth credentials needed. `downloader.test.ts` streams fake data through the real `archiver`/filesystem pipeline and reads the resulting ZIPs back with `yauzl` to verify byte-exact contents, correct split boundaries, oversized-file handling, resumability (rerunning skips completed parts), and that a mid-part failure leaves no stray `.tmp` file behind while earlier completed parts stay intact.
