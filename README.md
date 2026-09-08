@@ -48,7 +48,9 @@ npm run dev -- scan -f <folder-id>
 npm run dev -- plan -f <folder-id> -s 4000
 
 # Stream the folder down as split ZIP parts (resumable — rerun to pick up
-# where a failed download left off)
+# where a failed download left off). Press Ctrl+C to stop gracefully: the
+# file currently in flight finishes, its part is safely discarded, and
+# rerunning the same command resumes from the last completed part.
 npm run dev -- download -f <folder-id> -o ./downloads -s 4000
 ```
 

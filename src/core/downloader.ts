@@ -22,6 +22,14 @@ async function fileExists(path: string): Promise<boolean> {
   }
 }
 
+/** Thrown when cancel() interrupts a run — distinguishes a deliberate stop from a real failure. */
+export class DownloadCancelledError extends Error {
+  constructor() {
+    super("Download cancelled");
+    this.name = "DownloadCancelledError";
+  }
+}
+
 /**
  * Streams files from Google Drive directly into split ZIP parts.
  * No file is ever fully written to local disk outside of a ZIP part —
@@ -38,10 +46,22 @@ async function fileExists(path: string): Promise<boolean> {
  */
 export class CloudDownloader extends ProgressEmitter {
   private readonly drive: drive_v3.Drive;
+  private cancelled = false;
 
   constructor(auth: OAuth2Client, private readonly options: SplitOptions) {
     super();
     this.drive = google.drive({ version: "v3", auth });
+  }
+
+  /**
+   * Requests a graceful stop: the file currently being fetched is allowed to
+   * finish (so its archive entry is never half-written), then the current
+   * part is abandoned via the normal error-cleanup path — same as any other
+   * mid-part failure, so it's simply redone in full on the next run. Earlier
+   * completed parts are untouched.
+   */
+  cancel(): void {
+    this.cancelled = true;
   }
 
   async run(files: CloudFile[]): Promise<void> {
@@ -51,6 +71,9 @@ export class CloudDownloader extends ProgressEmitter {
     await mkdir(this.options.destinationDir, { recursive: true });
 
     for (const part of parts) {
+      if (this.cancelled) {
+        throw new DownloadCancelledError();
+      }
       await this.writePart(part, parts.length);
     }
   }
@@ -81,10 +104,20 @@ export class CloudDownloader extends ProgressEmitter {
       output.on("error", reject);
       archive.on("error", reject);
     });
+    // If a part is torn down mid-stream (cancellation, or a failure on a
+    // later file after earlier ones already succeeded), archiver can still
+    // have a buffered write in flight to `output` when we destroy it —
+    // that write's resulting 'error' event fires after nothing is awaiting
+    // `closed` anymore. Without this, that's an unhandled rejection; the
+    // outcome is unaffected either way since the .tmp gets unlinked regardless.
+    closed.catch(() => {});
 
     try {
       for (const file of part.files) {
         await this.appendFile(archive, file, part.partIndex);
+        if (this.cancelled) {
+          throw new DownloadCancelledError();
+        }
       }
       await archive.finalize();
       await closed;
@@ -101,7 +134,9 @@ export class CloudDownloader extends ProgressEmitter {
       }
       await unlink(tmpPath).catch(() => {});
       const error = err instanceof Error ? err : new Error(String(err));
-      this.emit("error", error);
+      if (!(error instanceof DownloadCancelledError)) {
+        this.emit("error", error);
+      }
       throw error;
     }
 

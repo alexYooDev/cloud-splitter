@@ -15,7 +15,7 @@ vi.mock("googleapis", () => ({
   },
 }));
 
-const { CloudDownloader } = await import("./downloader.js");
+const { CloudDownloader, DownloadCancelledError } = await import("./downloader.js");
 
 const DUMMY_AUTH = {} as OAuth2Client;
 
@@ -151,5 +151,55 @@ describe("CloudDownloader", () => {
 
     const part1 = await readZipEntries(join(outDir, "Part_01.zip"));
     expect(part1.map((e) => e.name)).toEqual(["a.bin", "b.bin"]);
+  });
+
+  it("cancel() before run() starts stops before fetching anything", async () => {
+    mockSuccessfulFetches(FILES);
+    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    downloader.cancel();
+
+    await expect(downloader.run(FILES)).rejects.toThrow(DownloadCancelledError);
+    expect(filesGet).not.toHaveBeenCalled();
+  });
+
+  it("cancel() after a part completes stops before the next part, keeping the finished part", async () => {
+    mockSuccessfulFetches(FILES);
+    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    downloader.on("part:complete", ({ partIndex }) => {
+      if (partIndex === 1) downloader.cancel();
+    });
+
+    await expect(downloader.run(FILES)).rejects.toThrow(DownloadCancelledError);
+
+    const entries = await readdir(outDir);
+    expect(entries).toEqual(["Part_01.zip"]);
+    expect(filesGet).not.toHaveBeenCalledWith(expect.objectContaining({ fileId: "f3" }), expect.anything());
+  });
+
+  it("cancel() mid-part lets the in-flight file finish, then discards the whole part (no stray .tmp, current file's fetch not repeated)", async () => {
+    mockSuccessfulFetches(FILES);
+    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    downloader.on("file:complete", ({ fileId }) => {
+      if (fileId === "f1") downloader.cancel();
+    });
+
+    await expect(downloader.run(FILES)).rejects.toThrow(DownloadCancelledError);
+
+    const entries = await readdir(outDir);
+    expect(entries).toEqual([]);
+    expect(filesGet).toHaveBeenCalledTimes(1);
+    expect(filesGet).toHaveBeenCalledWith({ fileId: "f1", alt: "media" }, { responseType: "stream" });
+  });
+
+  it("does not emit an 'error' event for a cancellation", async () => {
+    mockSuccessfulFetches(FILES);
+    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    downloader.cancel();
+
+    const errorListener = vi.fn();
+    downloader.on("error", errorListener);
+
+    await expect(downloader.run(FILES)).rejects.toThrow(DownloadCancelledError);
+    expect(errorListener).not.toHaveBeenCalled();
   });
 });

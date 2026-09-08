@@ -3,7 +3,7 @@ import { Command } from "commander";
 import { getAuthorizedClient } from "../core/auth.js";
 import { scanFolder } from "../core/scanner.js";
 import { planZipParts } from "../core/binpacker.js";
-import { CloudDownloader } from "../core/downloader.js";
+import { CloudDownloader, DownloadCancelledError } from "../core/downloader.js";
 
 const program = new Command();
 
@@ -110,8 +110,32 @@ program
       console.log(`Part ${partIndex} complete: ${(sizeBytes / 1024 / 1024).toFixed(2)} MB -> ${outputPath}`);
     });
 
-    await downloader.run(files);
-    console.log("\nDownload complete.");
+    let interruptCount = 0;
+    const onSigint = () => {
+      interruptCount++;
+      if (interruptCount === 1) {
+        console.log("\nInterrupting after the current file finishes (press Ctrl+C again to force quit)...");
+        downloader.cancel();
+      } else {
+        console.log("\nForce quitting — the in-progress part's .tmp file may be left behind, but is safely ignored on the next run.");
+        process.exit(130);
+      }
+    };
+    process.on("SIGINT", onSigint);
+
+    try {
+      await downloader.run(files);
+      console.log("\nDownload complete.");
+    } catch (err) {
+      if (err instanceof DownloadCancelledError) {
+        console.log("\nInterrupted. Completed parts are saved in place — rerun this same command to resume.");
+        process.exitCode = 130;
+        return;
+      }
+      throw err;
+    } finally {
+      process.off("SIGINT", onSigint);
+    }
   });
 
 program.parseAsync().catch((err) => {
