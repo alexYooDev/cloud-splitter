@@ -1,11 +1,9 @@
 import { createWriteStream } from "node:fs";
 import { mkdir, rename, unlink, access } from "node:fs/promises";
 import { join } from "node:path";
-import type { Readable } from "node:stream";
 import archiver from "archiver";
-import { google, drive_v3 } from "googleapis";
-import type { OAuth2Client } from "google-auth-library";
 import { ProgressEmitter } from "./events.js";
+import type { CloudProvider } from "./provider.js";
 import type { CloudFile, SplitOptions, ZipPlanPart } from "./types.js";
 import { planZipParts } from "./binpacker.js";
 import { withRetry, type RetryOptions } from "./retry.js";
@@ -34,9 +32,10 @@ export class DownloadCancelledError extends Error {
 }
 
 /**
- * Streams files from Google Drive directly into split ZIP parts.
+ * Streams files from a CloudProvider directly into split ZIP parts, with no
+ * dependency on which provider it is (Google Drive, OneDrive, ...).
  * No file is ever fully written to local disk outside of a ZIP part —
- * each file's HTTP response stream is piped straight into `archiver`.
+ * each file's stream is piped straight into `archiver`.
  *
  * Splitting is decided up front by planZipParts (based on scanned file
  * sizes), then executed one part at a time: open Part_N.zip.tmp, stream
@@ -48,16 +47,14 @@ export class DownloadCancelledError extends Error {
  * resumes from the first missing/incomplete part instead of starting over.
  */
 export class CloudDownloader extends ProgressEmitter {
-  private readonly drive: drive_v3.Drive;
   private cancelled = false;
 
   constructor(
-    auth: OAuth2Client,
+    private readonly provider: CloudProvider,
     private readonly options: SplitOptions,
     private readonly fetchRetryOptions: FetchRetryTuning = {}
   ) {
     super();
-    this.drive = google.drive({ version: "v3", auth });
   }
 
   /**
@@ -179,8 +176,8 @@ export class CloudDownloader extends ProgressEmitter {
     // still handled correctly, just at a coarser grain — it fails the whole
     // part, which the existing atomic tmp/rename + resume logic cleanly
     // redoes in full on the next run.
-    const res = await withRetry(
-      () => this.drive.files.get({ fileId: file.id, alt: "media" }, { responseType: "stream" }),
+    const stream = await withRetry(
+      () => this.provider.fetchFileStream(file.id),
       {
         ...this.fetchRetryOptions,
         shouldAbort: () => this.cancelled,
@@ -194,7 +191,6 @@ export class CloudDownloader extends ProgressEmitter {
         },
       }
     );
-    const stream: Readable = res.data;
 
     let bytesWritten = 0;
     stream.on("data", (chunk: Buffer) => {

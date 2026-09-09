@@ -10,7 +10,7 @@ vi.mock("googleapis", () => ({
   },
 }));
 
-const { scanTarget } = await import("../../src/core/scanner.js");
+const { GoogleDriveProvider } = await import("../../../src/core/providers/google/provider.js");
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const DOC_MIME = "application/vnd.google-apps.document";
@@ -18,6 +18,10 @@ const DUMMY_AUTH = {} as OAuth2Client;
 
 function extractFolderId(q: string): string {
   return q.match(/'(.+)' in parents/)![1]!;
+}
+
+function makeProvider() {
+  return new GoogleDriveProvider(DUMMY_AUTH);
 }
 
 beforeEach(() => {
@@ -28,7 +32,57 @@ beforeEach(() => {
   filesGet.mockResolvedValue({ data: { id: "root", name: "root", mimeType: FOLDER_MIME } });
 });
 
-describe("scanTarget — folder", () => {
+describe("GoogleDriveProvider.listChildren", () => {
+  it("returns one CloudItem per child, distinguishing folders from files", async () => {
+    filesList.mockResolvedValue({
+      data: {
+        files: [
+          { id: "f1", name: "a.txt", mimeType: "text/plain", size: "1000" },
+          { id: "sub1", name: "Sub", mimeType: FOLDER_MIME },
+        ],
+      },
+    });
+
+    const items = await makeProvider().listChildren("root");
+
+    expect(items).toEqual([
+      { id: "f1", name: "a.txt", isFolder: false, sizeBytes: 1000, mimeType: "text/plain" },
+      { id: "sub1", name: "Sub", isFolder: true, sizeBytes: undefined, mimeType: FOLDER_MIME },
+    ]);
+  });
+
+  it("follows nextPageToken to collect every page", async () => {
+    filesList.mockImplementation(async ({ pageToken }: { pageToken?: string }) => {
+      if (!pageToken) {
+        return {
+          data: {
+            files: [{ id: "f1", name: "a.txt", mimeType: "text/plain", size: "10" }],
+            nextPageToken: "page2",
+          },
+        };
+      }
+      expect(pageToken).toBe("page2");
+      return { data: { files: [{ id: "f2", name: "b.txt", mimeType: "text/plain", size: "20" }] } };
+    });
+
+    const items = await makeProvider().listChildren("root");
+
+    expect(filesList).toHaveBeenCalledTimes(2);
+    expect(items.map((i) => i.name)).toEqual(["a.txt", "b.txt"]);
+  });
+});
+
+describe("GoogleDriveProvider.getItemMetadata", () => {
+  it("resolves a single item's metadata", async () => {
+    filesGet.mockResolvedValue({ data: { id: "f1", name: "solo.txt", mimeType: "text/plain", size: "1234" } });
+
+    const item = await makeProvider().getItemMetadata("f1");
+
+    expect(item).toEqual({ id: "f1", name: "solo.txt", isFolder: false, sizeBytes: 1234, mimeType: "text/plain" });
+  });
+});
+
+describe("GoogleDriveProvider.scanTarget — folder", () => {
   it("recursively flattens nested folders into relative paths with exact sizes", async () => {
     filesList.mockImplementation(async ({ q }: { q: string }) => {
       const folderId = extractFolderId(q);
@@ -48,33 +102,13 @@ describe("scanTarget — folder", () => {
       throw new Error(`unexpected folder id: ${folderId}`);
     });
 
-    const result = await scanTarget("root", DUMMY_AUTH);
+    const result = await makeProvider().scanTarget("root");
 
     expect(result.errors).toEqual([]);
     expect(result.files).toEqual([
       { id: "f1", name: "a.txt", relativePath: "a.txt", sizeBytes: 1000, mimeType: "text/plain" },
       { id: "f2", name: "b.txt", relativePath: "Sub/b.txt", sizeBytes: 2000, mimeType: "text/plain" },
     ]);
-  });
-
-  it("follows nextPageToken to collect every page within a folder", async () => {
-    filesList.mockImplementation(async ({ pageToken }: { pageToken?: string }) => {
-      if (!pageToken) {
-        return {
-          data: {
-            files: [{ id: "f1", name: "a.txt", mimeType: "text/plain", size: "10" }],
-            nextPageToken: "page2",
-          },
-        };
-      }
-      expect(pageToken).toBe("page2");
-      return { data: { files: [{ id: "f2", name: "b.txt", mimeType: "text/plain", size: "20" }] } };
-    });
-
-    const result = await scanTarget("root", DUMMY_AUTH);
-
-    expect(filesList).toHaveBeenCalledTimes(2);
-    expect(result.files.map((f) => f.name)).toEqual(["a.txt", "b.txt"]);
   });
 
   it("skips native Google Docs/Sheets/Slides with a warning instead of including them", async () => {
@@ -87,7 +121,7 @@ describe("scanTarget — folder", () => {
       },
     });
 
-    const result = await scanTarget("root", DUMMY_AUTH);
+    const result = await makeProvider().scanTarget("root");
 
     expect(result.files).toEqual([
       { id: "f1", name: "a.txt", relativePath: "a.txt", sizeBytes: 10, mimeType: "text/plain" },
@@ -107,7 +141,7 @@ describe("scanTarget — folder", () => {
       },
     });
 
-    const result = await scanTarget("root", DUMMY_AUTH);
+    const result = await makeProvider().scanTarget("root");
 
     expect(result.files).toHaveLength(1);
     expect(result.errors).toHaveLength(1);
@@ -136,7 +170,7 @@ describe("scanTarget — folder", () => {
       throw new Error(`unexpected folder id: ${folderId}`);
     });
 
-    const result = await scanTarget("root", DUMMY_AUTH);
+    const result = await makeProvider().scanTarget("root");
 
     expect(result.files.map((f) => f.relativePath)).toEqual(["Good/c.txt"]);
     expect(result.errors).toEqual([{ fileId: "bad", message: "permission denied" }]);
@@ -144,16 +178,16 @@ describe("scanTarget — folder", () => {
 
   it("returns an empty result for an empty folder", async () => {
     filesList.mockResolvedValue({ data: { files: [] } });
-    const result = await scanTarget("root", DUMMY_AUTH);
+    const result = await makeProvider().scanTarget("root");
     expect(result).toEqual({ files: [], errors: [] });
   });
 });
 
-describe("scanTarget — single file", () => {
+describe("GoogleDriveProvider.scanTarget — single file", () => {
   it("returns just that file when the id points to a plain file, not a folder", async () => {
     filesGet.mockResolvedValue({ data: { id: "f1", name: "solo.txt", mimeType: "text/plain", size: "1234" } });
 
-    const result = await scanTarget("f1", DUMMY_AUTH);
+    const result = await makeProvider().scanTarget("f1");
 
     expect(result).toEqual({
       files: [{ id: "f1", name: "solo.txt", relativePath: "solo.txt", sizeBytes: 1234, mimeType: "text/plain" }],
@@ -165,7 +199,7 @@ describe("scanTarget — single file", () => {
   it("returns an error instead of a file when the single target is a native Google Doc", async () => {
     filesGet.mockResolvedValue({ data: { id: "doc1", name: "My Doc", mimeType: DOC_MIME } });
 
-    const result = await scanTarget("doc1", DUMMY_AUTH);
+    const result = await makeProvider().scanTarget("doc1");
 
     expect(result.files).toEqual([]);
     expect(result.errors).toEqual([
@@ -179,7 +213,7 @@ describe("scanTarget — single file", () => {
   it("returns an error instead of a file when the single target is missing a size", async () => {
     filesGet.mockResolvedValue({ data: { id: "f1", name: "no-size.bin", mimeType: "application/octet-stream" } });
 
-    const result = await scanTarget("f1", DUMMY_AUTH);
+    const result = await makeProvider().scanTarget("f1");
 
     expect(result.files).toEqual([]);
     expect(result.errors).toHaveLength(1);

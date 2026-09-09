@@ -4,20 +4,9 @@ import { mkdtemp, rm, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as yauzl from "yauzl";
-import type { OAuth2Client } from "google-auth-library";
+import { CloudDownloader, DownloadCancelledError } from "../../src/core/downloader.js";
+import type { CloudProvider } from "../../src/core/provider.js";
 import type { CloudFile } from "../../src/core/types.js";
-
-const filesGet = vi.fn();
-
-vi.mock("googleapis", () => ({
-  google: {
-    drive: vi.fn(() => ({ files: { get: filesGet } })),
-  },
-}));
-
-const { CloudDownloader, DownloadCancelledError } = await import("../../src/core/downloader.js");
-
-const DUMMY_AUTH = {} as OAuth2Client;
 
 function mkFile(id: string, name: string, mb: number): CloudFile {
   return { id, name, relativePath: name, sizeBytes: mb * 1024 * 1024, mimeType: "application/octet-stream" };
@@ -52,10 +41,19 @@ async function readZipEntries(path: string) {
 }
 
 let outDir: string;
+let fetchFileStream: ReturnType<typeof vi.fn<(fileId: string) => Promise<Readable>>>;
+let fakeProvider: CloudProvider;
 
 beforeEach(async () => {
-  filesGet.mockReset();
   outDir = await mkdtemp(join(tmpdir(), "cloudsplitter-test-"));
+  fetchFileStream = vi.fn<(fileId: string) => Promise<Readable>>();
+  fakeProvider = {
+    name: "Fake Provider",
+    listChildren: vi.fn(),
+    getItemMetadata: vi.fn(),
+    scanTarget: vi.fn(),
+    fetchFileStream,
+  };
 });
 
 afterEach(async () => {
@@ -76,16 +74,16 @@ const FILES = [
 ];
 
 function mockSuccessfulFetches(files: CloudFile[]) {
-  filesGet.mockImplementation(async ({ fileId }: { fileId: string }) => {
+  fetchFileStream.mockImplementation(async (fileId: string) => {
     const file = files.find((f) => f.id === fileId)!;
-    return { data: fakeStream(file.sizeBytes, FILL[fileId]!) };
+    return fakeStream(file.sizeBytes, FILL[fileId]!);
   });
 }
 
 describe("CloudDownloader", () => {
   it("splits files into byte-exact ZIP parts and warns on an oversized standalone file", async () => {
     mockSuccessfulFetches(FILES);
-    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    const downloader = new CloudDownloader(fakeProvider, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
 
     const warnings: string[] = [];
     downloader.on("file:warning", ({ message }) => warnings.push(message));
@@ -119,29 +117,29 @@ describe("CloudDownloader", () => {
 
   it("skips parts that already completed on a previous run instead of re-fetching them", async () => {
     mockSuccessfulFetches(FILES);
-    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    const downloader = new CloudDownloader(fakeProvider, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
     await downloader.run(FILES);
 
-    const fetchCountAfterFirstRun = filesGet.mock.calls.length;
+    const fetchCountAfterFirstRun = fetchFileStream.mock.calls.length;
     const partStarts: number[] = [];
 
-    const resumedDownloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    const resumedDownloader = new CloudDownloader(fakeProvider, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
     resumedDownloader.on("part:start", ({ partIndex }) => partStarts.push(partIndex));
     await resumedDownloader.run(FILES);
 
-    expect(filesGet.mock.calls.length).toBe(fetchCountAfterFirstRun);
+    expect(fetchFileStream.mock.calls.length).toBe(fetchCountAfterFirstRun);
     expect(partStarts).toEqual([]);
   });
 
   it("on a mid-part failure, leaves prior completed parts intact and no stray .tmp file behind", async () => {
     // part1 = [a, b] succeeds; part2 = [c] fails on its only file.
-    filesGet.mockImplementation(async ({ fileId }: { fileId: string }) => {
+    fetchFileStream.mockImplementation(async (fileId: string) => {
       if (fileId === "f3") throw new Error("simulated network failure");
       const file = FILES.find((f) => f.id === fileId)!;
-      return { data: fakeStream(file.sizeBytes, FILL[fileId]!) };
+      return fakeStream(file.sizeBytes, FILL[fileId]!);
     });
 
-    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    const downloader = new CloudDownloader(fakeProvider, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
 
     await expect(downloader.run(FILES)).rejects.toThrow(/simulated network failure/);
 
@@ -155,16 +153,16 @@ describe("CloudDownloader", () => {
 
   it("cancel() before run() starts stops before fetching anything", async () => {
     mockSuccessfulFetches(FILES);
-    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    const downloader = new CloudDownloader(fakeProvider, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
     downloader.cancel();
 
     await expect(downloader.run(FILES)).rejects.toThrow(DownloadCancelledError);
-    expect(filesGet).not.toHaveBeenCalled();
+    expect(fetchFileStream).not.toHaveBeenCalled();
   });
 
   it("cancel() after a part completes stops before the next part, keeping the finished part", async () => {
     mockSuccessfulFetches(FILES);
-    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    const downloader = new CloudDownloader(fakeProvider, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
     downloader.on("part:complete", ({ partIndex }) => {
       if (partIndex === 1) downloader.cancel();
     });
@@ -173,12 +171,12 @@ describe("CloudDownloader", () => {
 
     const entries = await readdir(outDir);
     expect(entries).toEqual(["Part_01.zip"]);
-    expect(filesGet).not.toHaveBeenCalledWith(expect.objectContaining({ fileId: "f3" }), expect.anything());
+    expect(fetchFileStream).not.toHaveBeenCalledWith("f3");
   });
 
   it("cancel() mid-part lets the in-flight file finish, then discards the whole part (no stray .tmp, current file's fetch not repeated)", async () => {
     mockSuccessfulFetches(FILES);
-    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    const downloader = new CloudDownloader(fakeProvider, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
     downloader.on("file:complete", ({ fileId }) => {
       if (fileId === "f1") downloader.cancel();
     });
@@ -187,13 +185,13 @@ describe("CloudDownloader", () => {
 
     const entries = await readdir(outDir);
     expect(entries).toEqual([]);
-    expect(filesGet).toHaveBeenCalledTimes(1);
-    expect(filesGet).toHaveBeenCalledWith({ fileId: "f1", alt: "media" }, { responseType: "stream" });
+    expect(fetchFileStream).toHaveBeenCalledTimes(1);
+    expect(fetchFileStream).toHaveBeenCalledWith("f1");
   });
 
   it("does not emit an 'error' event for a cancellation", async () => {
     mockSuccessfulFetches(FILES);
-    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
+    const downloader = new CloudDownloader(fakeProvider, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir });
     downloader.cancel();
 
     const errorListener = vi.fn();
@@ -213,16 +211,16 @@ describe("CloudDownloader retry", () => {
 
   it("retries a transient fetch failure and eventually succeeds, with correct final content", async () => {
     let f1Attempts = 0;
-    filesGet.mockImplementation(async ({ fileId }: { fileId: string }) => {
+    fetchFileStream.mockImplementation(async (fileId: string) => {
       if (fileId === "f1") {
         f1Attempts++;
         if (f1Attempts <= 2) throw { status: 503 };
       }
       const file = FILES.find((f) => f.id === fileId)!;
-      return { data: fakeStream(file.sizeBytes, FILL[fileId]!) };
+      return fakeStream(file.sizeBytes, FILL[fileId]!);
     });
 
-    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir }, FAST_RETRY);
+    const downloader = new CloudDownloader(fakeProvider, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir }, FAST_RETRY);
     const retries: { fileId: string; attempt: number; maxAttempts: number }[] = [];
     downloader.on("file:retry", ({ fileId, attempt, maxAttempts }) => retries.push({ fileId, attempt, maxAttempts }));
 
@@ -241,7 +239,7 @@ describe("CloudDownloader retry", () => {
 
   it("does not retry a non-retryable fetch failure", async () => {
     let f1Calls = 0;
-    filesGet.mockImplementation(async ({ fileId }: { fileId: string }) => {
+    fetchFileStream.mockImplementation(async (fileId: string) => {
       if (fileId === "f1") {
         f1Calls++;
         throw { status: 404 };
@@ -249,7 +247,7 @@ describe("CloudDownloader retry", () => {
       throw new Error("should not be called");
     });
 
-    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir }, FAST_RETRY);
+    const downloader = new CloudDownloader(fakeProvider, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir }, FAST_RETRY);
     const retryListener = vi.fn();
     downloader.on("file:retry", retryListener);
 
@@ -261,7 +259,7 @@ describe("CloudDownloader retry", () => {
 
   it("cancel() during a retry backoff surfaces as a cancellation, not the underlying transient error", async () => {
     let f1Calls = 0;
-    filesGet.mockImplementation(async ({ fileId }: { fileId: string }) => {
+    fetchFileStream.mockImplementation(async (fileId: string) => {
       if (fileId === "f1") {
         f1Calls++;
         throw { status: 503 };
@@ -269,7 +267,7 @@ describe("CloudDownloader retry", () => {
       throw new Error("should not be called");
     });
 
-    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir }, FAST_RETRY);
+    const downloader = new CloudDownloader(fakeProvider, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir }, FAST_RETRY);
     const errorListener = vi.fn();
     downloader.on("error", errorListener);
     // Cancels on the first retry notification. The already-in-flight next

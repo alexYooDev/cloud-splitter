@@ -1,8 +1,8 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import cliProgress from "cli-progress";
-import { getAuthorizedClient } from "../core/auth.js";
-import { scanTarget } from "../core/scanner.js";
+import { getAuthorizedClient } from "../core/providers/google/auth.js";
+import { GoogleDriveProvider } from "../core/providers/google/provider.js";
 import { planZipParts } from "../core/binpacker.js";
 import { CloudDownloader, DownloadCancelledError } from "../core/downloader.js";
 
@@ -27,7 +27,8 @@ program
   .requiredOption("-f, --id <id>", "Google Drive file or folder ID to scan")
   .action(async (opts: { id: string }) => {
     const client = await getAuthorizedClient();
-    const { files, errors } = await scanTarget(opts.id, client);
+    const provider = new GoogleDriveProvider(client);
+    const { files, errors } = await provider.scanTarget(opts.id);
 
     const totalBytes = files.reduce((sum, f) => sum + f.sizeBytes, 0);
     for (const file of files) {
@@ -50,7 +51,8 @@ program
   .option("-s, --split-size <mb>", "Max size per ZIP part, in MB", "4000")
   .action(async (opts: { id: string; splitSize: string }) => {
     const client = await getAuthorizedClient();
-    const { files, errors } = await scanTarget(opts.id, client);
+    const provider = new GoogleDriveProvider(client);
+    const { files, errors } = await provider.scanTarget(opts.id);
 
     const splitSizeBytes = Number(opts.splitSize) * 1024 * 1024;
     const parts = planZipParts(files, { splitSizeBytes, destinationDir: "" });
@@ -81,13 +83,14 @@ program
   .option("-s, --split-size <mb>", "Max size per ZIP part, in MB", "4000")
   .action(async (opts: { id: string; output: string; splitSize: string }) => {
     const client = await getAuthorizedClient();
-    const { files, errors } = await scanTarget(opts.id, client);
+    const provider = new GoogleDriveProvider(client);
+    const { files, errors } = await provider.scanTarget(opts.id);
     for (const err of errors) {
       console.log(`warning: ${err.message}`);
     }
 
     const splitSizeBytes = Number(opts.splitSize) * 1024 * 1024;
-    const downloader = new CloudDownloader(client, {
+    const downloader = new CloudDownloader(provider, {
       splitSizeBytes,
       destinationDir: opts.output,
     });
