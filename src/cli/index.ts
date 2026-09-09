@@ -1,10 +1,11 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import cliProgress from "cli-progress";
-import { getAuthorizedClient } from "../core/providers/google/auth.js";
-import { GoogleDriveProvider } from "../core/providers/google/provider.js";
+import { getProvider, type ProviderName } from "../core/providers/index.js";
+import type { CloudProvider } from "../core/provider.js";
 import { planZipParts } from "../core/binpacker.js";
 import { CloudDownloader, DownloadCancelledError } from "../core/downloader.js";
+import { pickProvider, pickTarget, InteractiveCancelledError } from "./interactive.js";
 
 const program = new Command();
 
@@ -13,22 +14,50 @@ program
   .description("Stream large cloud-storage folders to disk as split ZIP parts")
   .version("0.1.0");
 
+function assertProviderName(value: string): asserts value is ProviderName {
+  if (value !== "google" && value !== "onedrive") {
+    throw new Error(`Unknown provider "${value}". Expected "google" or "onedrive".`);
+  }
+}
+
+async function resolveProvider(providerOpt: string | undefined): Promise<CloudProvider> {
+  let name: ProviderName;
+  if (providerOpt) {
+    assertProviderName(providerOpt);
+    name = providerOpt;
+  } else {
+    name = await pickProvider();
+  }
+  return getProvider(name);
+}
+
+/** Resolves a ready CloudProvider and target id, prompting interactively for whatever wasn't passed as a flag. */
+async function resolveProviderAndTarget(opts: {
+  provider?: string;
+  id?: string;
+}): Promise<{ provider: CloudProvider; id: string }> {
+  const provider = await resolveProvider(opts.provider);
+  const id = opts.id ?? (await pickTarget(provider)).id;
+  return { provider, id };
+}
+
 program
   .command("auth")
-  .description("Authenticate with Google Drive")
-  .action(async () => {
-    await getAuthorizedClient();
-    console.log("Authenticated. Token saved to ~/.cloudsplitter/token.json");
+  .description("Authenticate with a cloud provider")
+  .option("-p, --provider <name>", "Cloud provider: google or onedrive")
+  .action(async (opts: { provider?: string }) => {
+    const provider = await resolveProvider(opts.provider);
+    console.log(`Authenticated with ${provider.name}.`);
   });
 
 program
   .command("scan")
-  .description("List all files under a Google Drive folder (or a single file), with sizes and paths")
-  .requiredOption("-f, --id <id>", "Google Drive file or folder ID to scan")
-  .action(async (opts: { id: string }) => {
-    const client = await getAuthorizedClient();
-    const provider = new GoogleDriveProvider(client);
-    const { files, errors } = await provider.scanTarget(opts.id);
+  .description("List all files under a cloud folder (or a single file), with sizes and paths")
+  .option("-p, --provider <name>", "Cloud provider: google or onedrive")
+  .option("-f, --id <id>", "File or folder ID to scan (omit to browse interactively)")
+  .action(async (opts: { provider?: string; id?: string }) => {
+    const { provider, id } = await resolveProviderAndTarget(opts);
+    const { files, errors } = await provider.scanTarget(id);
 
     const totalBytes = files.reduce((sum, f) => sum + f.sizeBytes, 0);
     for (const file of files) {
@@ -47,12 +76,12 @@ program
 program
   .command("plan")
   .description("Scan a folder or file and preview how it would be split into ZIP parts")
-  .requiredOption("-f, --id <id>", "Google Drive file or folder ID to scan")
+  .option("-p, --provider <name>", "Cloud provider: google or onedrive")
+  .option("-f, --id <id>", "File or folder ID to scan (omit to browse interactively)")
   .option("-s, --split-size <mb>", "Max size per ZIP part, in MB", "4000")
-  .action(async (opts: { id: string; splitSize: string }) => {
-    const client = await getAuthorizedClient();
-    const provider = new GoogleDriveProvider(client);
-    const { files, errors } = await provider.scanTarget(opts.id);
+  .action(async (opts: { provider?: string; id?: string; splitSize: string }) => {
+    const { provider, id } = await resolveProviderAndTarget(opts);
+    const { files, errors } = await provider.scanTarget(id);
 
     const splitSizeBytes = Number(opts.splitSize) * 1024 * 1024;
     const parts = planZipParts(files, { splitSizeBytes, destinationDir: "" });
@@ -78,13 +107,13 @@ program
 program
   .command("download")
   .description("Scan a cloud folder or file and stream it down as split ZIP parts")
-  .requiredOption("-f, --id <id>", "Google Drive file or folder ID to download")
+  .option("-p, --provider <name>", "Cloud provider: google or onedrive")
+  .option("-f, --id <id>", "File or folder ID to download (omit to browse interactively)")
   .requiredOption("-o, --output <dir>", "Destination directory for ZIP parts")
   .option("-s, --split-size <mb>", "Max size per ZIP part, in MB", "4000")
-  .action(async (opts: { id: string; output: string; splitSize: string }) => {
-    const client = await getAuthorizedClient();
-    const provider = new GoogleDriveProvider(client);
-    const { files, errors } = await provider.scanTarget(opts.id);
+  .action(async (opts: { provider?: string; id?: string; output: string; splitSize: string }) => {
+    const { provider, id } = await resolveProviderAndTarget(opts);
+    const { files, errors } = await provider.scanTarget(id);
     for (const err of errors) {
       console.log(`warning: ${err.message}`);
     }
@@ -186,6 +215,10 @@ program
   });
 
 program.parseAsync().catch((err) => {
+  if (err instanceof InteractiveCancelledError) {
+    process.exitCode = 1;
+    return;
+  }
   console.error(err instanceof Error ? err.message : err);
   process.exitCode = 1;
 });
