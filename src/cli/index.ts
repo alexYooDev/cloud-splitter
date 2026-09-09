@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { Command } from "commander";
 import { getAuthorizedClient } from "../core/auth.js";
-import { scanFolder } from "../core/scanner.js";
+import { scanTarget } from "../core/scanner.js";
 import { planZipParts } from "../core/binpacker.js";
 import { CloudDownloader, DownloadCancelledError } from "../core/downloader.js";
 
@@ -22,11 +22,11 @@ program
 
 program
   .command("scan")
-  .description("List all files under a Google Drive folder, with sizes and paths")
-  .requiredOption("-f, --folder-id <id>", "Google Drive folder ID to scan")
-  .action(async (opts: { folderId: string }) => {
+  .description("List all files under a Google Drive folder (or a single file), with sizes and paths")
+  .requiredOption("-f, --id <id>", "Google Drive file or folder ID to scan")
+  .action(async (opts: { id: string }) => {
     const client = await getAuthorizedClient();
-    const { files, errors } = await scanFolder(opts.folderId, client);
+    const { files, errors } = await scanTarget(opts.id, client);
 
     const totalBytes = files.reduce((sum, f) => sum + f.sizeBytes, 0);
     for (const file of files) {
@@ -44,12 +44,12 @@ program
 
 program
   .command("plan")
-  .description("Scan a folder and preview how it would be split into ZIP parts")
-  .requiredOption("-f, --folder-id <id>", "Google Drive folder ID to scan")
+  .description("Scan a folder or file and preview how it would be split into ZIP parts")
+  .requiredOption("-f, --id <id>", "Google Drive file or folder ID to scan")
   .option("-s, --split-size <mb>", "Max size per ZIP part, in MB", "4000")
-  .action(async (opts: { folderId: string; splitSize: string }) => {
+  .action(async (opts: { id: string; splitSize: string }) => {
     const client = await getAuthorizedClient();
-    const { files, errors } = await scanFolder(opts.folderId, client);
+    const { files, errors } = await scanTarget(opts.id, client);
 
     const splitSizeBytes = Number(opts.splitSize) * 1024 * 1024;
     const parts = planZipParts(files, { splitSizeBytes, destinationDir: "" });
@@ -74,13 +74,13 @@ program
 
 program
   .command("download")
-  .description("Scan a cloud folder and stream it down as split ZIP parts")
-  .requiredOption("-f, --folder-id <id>", "Google Drive folder ID to download")
+  .description("Scan a cloud folder or file and stream it down as split ZIP parts")
+  .requiredOption("-f, --id <id>", "Google Drive file or folder ID to download")
   .requiredOption("-o, --output <dir>", "Destination directory for ZIP parts")
   .option("-s, --split-size <mb>", "Max size per ZIP part, in MB", "4000")
-  .action(async (opts: { folderId: string; output: string; splitSize: string }) => {
+  .action(async (opts: { id: string; output: string; splitSize: string }) => {
     const client = await getAuthorizedClient();
-    const { files, errors } = await scanFolder(opts.folderId, client);
+    const { files, errors } = await scanTarget(opts.id, client);
     for (const err of errors) {
       console.log(`warning: ${err.message}`);
     }

@@ -2,14 +2,15 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { OAuth2Client } from "google-auth-library";
 
 const filesList = vi.fn();
+const filesGet = vi.fn();
 
 vi.mock("googleapis", () => ({
   google: {
-    drive: vi.fn(() => ({ files: { list: filesList } })),
+    drive: vi.fn(() => ({ files: { list: filesList, get: filesGet } })),
   },
 }));
 
-const { scanFolder } = await import("./scanner.js");
+const { scanTarget } = await import("./scanner.js");
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const DOC_MIME = "application/vnd.google-apps.document";
@@ -21,9 +22,13 @@ function extractFolderId(q: string): string {
 
 beforeEach(() => {
   filesList.mockReset();
+  filesGet.mockReset();
+  // Default: the target id ("root") resolves to a folder, matching the
+  // existing folder-walk tests below unless a test overrides this.
+  filesGet.mockResolvedValue({ data: { id: "root", name: "root", mimeType: FOLDER_MIME } });
 });
 
-describe("scanFolder", () => {
+describe("scanTarget — folder", () => {
   it("recursively flattens nested folders into relative paths with exact sizes", async () => {
     filesList.mockImplementation(async ({ q }: { q: string }) => {
       const folderId = extractFolderId(q);
@@ -43,7 +48,7 @@ describe("scanFolder", () => {
       throw new Error(`unexpected folder id: ${folderId}`);
     });
 
-    const result = await scanFolder("root", DUMMY_AUTH);
+    const result = await scanTarget("root", DUMMY_AUTH);
 
     expect(result.errors).toEqual([]);
     expect(result.files).toEqual([
@@ -66,7 +71,7 @@ describe("scanFolder", () => {
       return { data: { files: [{ id: "f2", name: "b.txt", mimeType: "text/plain", size: "20" }] } };
     });
 
-    const result = await scanFolder("root", DUMMY_AUTH);
+    const result = await scanTarget("root", DUMMY_AUTH);
 
     expect(filesList).toHaveBeenCalledTimes(2);
     expect(result.files.map((f) => f.name)).toEqual(["a.txt", "b.txt"]);
@@ -82,7 +87,7 @@ describe("scanFolder", () => {
       },
     });
 
-    const result = await scanFolder("root", DUMMY_AUTH);
+    const result = await scanTarget("root", DUMMY_AUTH);
 
     expect(result.files).toEqual([
       { id: "f1", name: "a.txt", relativePath: "a.txt", sizeBytes: 10, mimeType: "text/plain" },
@@ -102,7 +107,7 @@ describe("scanFolder", () => {
       },
     });
 
-    const result = await scanFolder("root", DUMMY_AUTH);
+    const result = await scanTarget("root", DUMMY_AUTH);
 
     expect(result.files).toHaveLength(1);
     expect(result.errors).toHaveLength(1);
@@ -131,7 +136,7 @@ describe("scanFolder", () => {
       throw new Error(`unexpected folder id: ${folderId}`);
     });
 
-    const result = await scanFolder("root", DUMMY_AUTH);
+    const result = await scanTarget("root", DUMMY_AUTH);
 
     expect(result.files.map((f) => f.relativePath)).toEqual(["Good/c.txt"]);
     expect(result.errors).toEqual([{ fileId: "bad", message: "permission denied" }]);
@@ -139,7 +144,45 @@ describe("scanFolder", () => {
 
   it("returns an empty result for an empty folder", async () => {
     filesList.mockResolvedValue({ data: { files: [] } });
-    const result = await scanFolder("root", DUMMY_AUTH);
+    const result = await scanTarget("root", DUMMY_AUTH);
     expect(result).toEqual({ files: [], errors: [] });
+  });
+});
+
+describe("scanTarget — single file", () => {
+  it("returns just that file when the id points to a plain file, not a folder", async () => {
+    filesGet.mockResolvedValue({ data: { id: "f1", name: "solo.txt", mimeType: "text/plain", size: "1234" } });
+
+    const result = await scanTarget("f1", DUMMY_AUTH);
+
+    expect(result).toEqual({
+      files: [{ id: "f1", name: "solo.txt", relativePath: "solo.txt", sizeBytes: 1234, mimeType: "text/plain" }],
+      errors: [],
+    });
+    expect(filesList).not.toHaveBeenCalled();
+  });
+
+  it("returns an error instead of a file when the single target is a native Google Doc", async () => {
+    filesGet.mockResolvedValue({ data: { id: "doc1", name: "My Doc", mimeType: DOC_MIME } });
+
+    const result = await scanTarget("doc1", DUMMY_AUTH);
+
+    expect(result.files).toEqual([]);
+    expect(result.errors).toEqual([
+      {
+        fileId: "doc1",
+        message: 'Skipped "My Doc": native Google Docs/Sheets/Slides files are not supported yet (export not implemented).',
+      },
+    ]);
+  });
+
+  it("returns an error instead of a file when the single target is missing a size", async () => {
+    filesGet.mockResolvedValue({ data: { id: "f1", name: "no-size.bin", mimeType: "application/octet-stream" } });
+
+    const result = await scanTarget("f1", DUMMY_AUTH);
+
+    expect(result.files).toEqual([]);
+    expect(result.errors).toHaveLength(1);
+    expect(result.errors[0]!.message).toMatch(/no-size\.bin/);
   });
 });

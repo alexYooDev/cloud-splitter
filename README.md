@@ -36,22 +36,25 @@ GOOGLE_REDIRECT_URI=http://localhost:3000/oauth2callback
 
 Run any command with `npm run dev -- <command>` (or `npm run build && npm start -- <command>` for the compiled version).
 
+`-f/--id` accepts either a folder ID or a single file ID — CloudSplitter checks the target's type and scans it accordingly, so every command below works the same way for both.
+
 ```bash
 # Authenticate once — opens a local server to catch the OAuth redirect,
 # caches the token at ~/.cloudsplitter/token.json
 npm run dev -- auth
 
-# List every file under a Drive folder, with sizes and relative paths
-npm run dev -- scan -f <folder-id>
+# List every file under a Drive folder (or just the one file), with sizes
+# and relative paths
+npm run dev -- scan -f <id>
 
-# Preview how a folder would be split into ZIP parts, without downloading
-npm run dev -- plan -f <folder-id> -s 4000
+# Preview how it would be split into ZIP parts, without downloading
+npm run dev -- plan -f <id> -s 4000
 
-# Stream the folder down as split ZIP parts (resumable — rerun to pick up
-# where a failed download left off). Press Ctrl+C to stop gracefully: the
-# file currently in flight finishes, its part is safely discarded, and
+# Stream it down as split ZIP parts (resumable — rerun to pick up where a
+# failed download left off). Press Ctrl+C to stop gracefully: the file
+# currently in flight finishes, its part is safely discarded, and
 # rerunning the same command resumes from the last completed part.
-npm run dev -- download -f <folder-id> -o ./downloads -s 4000
+npm run dev -- download -f <id> -o ./downloads -s 4000
 ```
 
 ## Project structure
@@ -64,7 +67,7 @@ src/
     types.ts       # CloudFile, ScanResult, ZipPlanPart, SplitOptions
     events.ts      # ProgressEmitter — typed progress events
     auth.ts        # Google OAuth 2.0 (Express-based localhost redirect)
-    scanner.ts      # Recursive Drive folder walk -> flat file list
+    scanner.ts      # Resolves a file or folder ID -> flat file list
     binpacker.ts    # Sequential bin-packing into size-bounded ZIP parts
     downloader.ts   # Streaming download + ZIP-split engine
     *.test.ts       # Vitest unit tests, colocated with the module they cover
