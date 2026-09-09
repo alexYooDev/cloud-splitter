@@ -203,3 +203,84 @@ describe("CloudDownloader", () => {
     expect(errorListener).not.toHaveBeenCalled();
   });
 });
+
+describe("CloudDownloader retry", () => {
+  // Real timers throughout — these tests exercise the real archiver/fs
+  // pipeline, and faking timers (even scoped to setTimeout) interfered with
+  // internal scheduling that library depends on and hung the tests. A tiny
+  // baseDelayMs keeps the backoff waits fast without needing fake timers.
+  const FAST_RETRY = { baseDelayMs: 1, maxDelayMs: 2 };
+
+  it("retries a transient fetch failure and eventually succeeds, with correct final content", async () => {
+    let f1Attempts = 0;
+    filesGet.mockImplementation(async ({ fileId }: { fileId: string }) => {
+      if (fileId === "f1") {
+        f1Attempts++;
+        if (f1Attempts <= 2) throw { status: 503 };
+      }
+      const file = FILES.find((f) => f.id === fileId)!;
+      return { data: fakeStream(file.sizeBytes, FILL[fileId]!) };
+    });
+
+    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir }, FAST_RETRY);
+    const retries: { fileId: string; attempt: number; maxAttempts: number }[] = [];
+    downloader.on("file:retry", ({ fileId, attempt, maxAttempts }) => retries.push({ fileId, attempt, maxAttempts }));
+
+    await downloader.run([FILES[0]!, FILES[1]!]); // a.bin + b.bin -> one part
+
+    expect(f1Attempts).toBe(3);
+    expect(retries).toEqual([
+      { fileId: "f1", attempt: 2, maxAttempts: 5 },
+      { fileId: "f1", attempt: 3, maxAttempts: 5 },
+    ]);
+
+    const part1 = await readZipEntries(join(outDir, "Part_01.zip"));
+    expect(part1.map((e) => e.name)).toEqual(["a.bin", "b.bin"]);
+    expect(part1[0]!.data.equals(Buffer.alloc(4 * 1024 * 1024, FILL.f1))).toBe(true);
+  });
+
+  it("does not retry a non-retryable fetch failure", async () => {
+    let f1Calls = 0;
+    filesGet.mockImplementation(async ({ fileId }: { fileId: string }) => {
+      if (fileId === "f1") {
+        f1Calls++;
+        throw { status: 404 };
+      }
+      throw new Error("should not be called");
+    });
+
+    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir }, FAST_RETRY);
+    const retryListener = vi.fn();
+    downloader.on("file:retry", retryListener);
+
+    await expect(downloader.run([FILES[0]!])).rejects.toBeTruthy();
+
+    expect(f1Calls).toBe(1);
+    expect(retryListener).not.toHaveBeenCalled();
+  });
+
+  it("cancel() during a retry backoff surfaces as a cancellation, not the underlying transient error", async () => {
+    let f1Calls = 0;
+    filesGet.mockImplementation(async ({ fileId }: { fileId: string }) => {
+      if (fileId === "f1") {
+        f1Calls++;
+        throw { status: 503 };
+      }
+      throw new Error("should not be called");
+    });
+
+    const downloader = new CloudDownloader(DUMMY_AUTH, { splitSizeBytes: SPLIT_BYTES, destinationDir: outDir }, FAST_RETRY);
+    const errorListener = vi.fn();
+    downloader.on("error", errorListener);
+    // Cancels on the first retry notification. The already-in-flight next
+    // attempt (already scheduled before cancel() was seen) is still allowed
+    // to run once and fail before shouldAbort() is checked again — same
+    // "let the current operation finish" pattern as file-level cancellation.
+    downloader.on("file:retry", () => downloader.cancel());
+
+    await expect(downloader.run([FILES[0]!])).rejects.toThrow(DownloadCancelledError);
+
+    expect(f1Calls).toBe(2);
+    expect(errorListener).not.toHaveBeenCalled();
+  });
+});

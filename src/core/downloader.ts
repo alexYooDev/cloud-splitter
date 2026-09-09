@@ -8,6 +8,9 @@ import type { OAuth2Client } from "google-auth-library";
 import { ProgressEmitter } from "./events.js";
 import type { CloudFile, SplitOptions, ZipPlanPart } from "./types.js";
 import { planZipParts } from "./binpacker.js";
+import { withRetry, type RetryOptions } from "./retry.js";
+
+type FetchRetryTuning = Pick<RetryOptions, "maxAttempts" | "baseDelayMs" | "maxDelayMs">;
 
 function partFileName(partIndex: number): string {
   return `Part_${String(partIndex).padStart(2, "0")}.zip`;
@@ -48,7 +51,11 @@ export class CloudDownloader extends ProgressEmitter {
   private readonly drive: drive_v3.Drive;
   private cancelled = false;
 
-  constructor(auth: OAuth2Client, private readonly options: SplitOptions) {
+  constructor(
+    auth: OAuth2Client,
+    private readonly options: SplitOptions,
+    private readonly fetchRetryOptions: FetchRetryTuning = {}
+  ) {
     super();
     this.drive = google.drive({ version: "v3", auth });
   }
@@ -133,7 +140,17 @@ export class CloudDownloader extends ProgressEmitter {
         });
       }
       await unlink(tmpPath).catch(() => {});
-      const error = err instanceof Error ? err : new Error(String(err));
+      // Once cancel() has been requested, prefer reporting cancellation over
+      // whatever error actually triggered teardown — e.g. a retry backoff
+      // aborted by shouldAbort() rethrows the original (possibly non-Error,
+      // unfriendly) fetch failure, not a DownloadCancelledError. From the
+      // user's perspective they asked to stop; that's the accurate outcome
+      // regardless of which underlying error happened to surface first.
+      const error = this.cancelled
+        ? new DownloadCancelledError()
+        : err instanceof Error
+          ? err
+          : new Error(String(err));
       if (!(error instanceof DownloadCancelledError)) {
         this.emit("error", error);
       }
@@ -152,7 +169,31 @@ export class CloudDownloader extends ProgressEmitter {
   private async appendFile(archive: archiver.Archiver, file: CloudFile, partIndex: number): Promise<void> {
     this.emit("file:start", { fileId: file.id, name: file.name, partIndex });
 
-    const res = await this.drive.files.get({ fileId: file.id, alt: "media" }, { responseType: "stream" });
+    // Retries only cover the request/connection phase — transient errors
+    // (rate limiting, a dropped connection before any bytes arrive) are safe
+    // to retry since nothing has been written to the archive yet. Once a
+    // stream is handed to archive.append() below, a failure there is NOT
+    // retried: archiver has already started writing that entry into the
+    // part's single zip stream, and there's no safe way to "undo" a partial
+    // entry and restart it without risking a corrupt part. That case is
+    // still handled correctly, just at a coarser grain — it fails the whole
+    // part, which the existing atomic tmp/rename + resume logic cleanly
+    // redoes in full on the next run.
+    const res = await withRetry(
+      () => this.drive.files.get({ fileId: file.id, alt: "media" }, { responseType: "stream" }),
+      {
+        ...this.fetchRetryOptions,
+        shouldAbort: () => this.cancelled,
+        onRetry: ({ attempt, maxAttempts, delayMs, error }) => {
+          this.emit("file:retry", {
+            fileId: file.id,
+            attempt,
+            maxAttempts,
+            message: `Retrying "${file.relativePath}" (attempt ${attempt}/${maxAttempts}, waiting ${Math.round(delayMs / 1000)}s) after: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        },
+      }
+    );
     const stream: Readable = res.data;
 
     let bytesWritten = 0;

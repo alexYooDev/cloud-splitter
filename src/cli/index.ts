@@ -103,6 +103,9 @@ program
     downloader.on("file:complete", () => {
       process.stdout.write("done\n");
     });
+    downloader.on("file:retry", ({ message }) => {
+      console.log(`\n  ! ${message}`);
+    });
     downloader.on("file:warning", ({ message }) => {
       console.log(`  ! ${message}`);
     });

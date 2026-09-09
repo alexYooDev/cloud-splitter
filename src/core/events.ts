@@ -14,6 +14,7 @@ export interface ProgressEvents {
   "file:start": [{ fileId: string; name: string; partIndex: number }];
   "file:progress": [{ fileId: string; bytesWritten: number; totalBytes: number }];
   "file:complete": [{ fileId: string }];
+  "file:retry": [{ fileId: string; attempt: number; maxAttempts: number; message: string }];
   "file:warning": [{ fileId: string; message: string }];
   error: [Error];
 }

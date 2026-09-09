@@ -4,7 +4,7 @@ Stream large Google Drive folders directly to disk as split ZIP parts — no int
 
 ## Why
 
-Downloading a 50GB+ folder through the native Drive web UI often fails to zip, or the connection drops partway through and you lose the whole thing. CloudSplitter streams each file from the Drive API straight into a ZIP part on disk, and once a part hits your chosen size limit (e.g. 3.9GB for FAT32), it closes that ZIP's central directory and starts the next one — so completed parts stay valid even if a later part fails.
+Downloading a 50GB+ folder through the native Drive web UI often fails to zip, or the connection drops partway through and you lose the whole thing. CloudSplitter streams each file from the Drive API straight into a ZIP part on disk, and once a part hits your chosen size limit (e.g. 3.9GB for FAT32), it closes that ZIP's central directory and starts the next one — so completed parts stay valid even if a later part fails. A transient failure fetching one file (rate limiting, a dropped connection) is retried with exponential backoff before giving up.
 
 ## Status
 
@@ -70,6 +70,7 @@ src/
     scanner.ts      # Resolves a file or folder ID -> flat file list
     binpacker.ts    # Sequential bin-packing into size-bounded ZIP parts
     downloader.ts   # Streaming download + ZIP-split engine
+    retry.ts        # Exponential backoff for transient Drive API failures
     *.test.ts       # Vitest unit tests, colocated with the module they cover
   cli/
     index.ts        # commander entry point
