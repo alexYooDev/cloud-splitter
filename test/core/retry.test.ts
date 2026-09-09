@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { isTransientError, withRetry } from "./retry.js";
+import { isTransientError, withRetry } from "../../src/core/retry.js";
 
 describe("isTransientError", () => {
   it.each([

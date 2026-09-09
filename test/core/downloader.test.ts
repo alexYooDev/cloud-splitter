@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as yauzl from "yauzl";
 import type { OAuth2Client } from "google-auth-library";
-import type { CloudFile } from "./types.js";
+import type { CloudFile } from "../../src/core/types.js";
 
 const filesGet = vi.fn();
 
@@ -15,7 +15,7 @@ vi.mock("googleapis", () => ({
   },
 }));
 
-const { CloudDownloader, DownloadCancelledError } = await import("./downloader.js");
+const { CloudDownloader, DownloadCancelledError } = await import("../../src/core/downloader.js");
 
 const DUMMY_AUTH = {} as OAuth2Client;
 

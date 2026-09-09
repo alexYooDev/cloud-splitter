@@ -10,7 +10,7 @@ vi.mock("googleapis", () => ({
   },
 }));
 
-const { scanTarget } = await import("./scanner.js");
+const { scanTarget } = await import("../../src/core/scanner.js");
 
 const FOLDER_MIME = "application/vnd.google-apps.folder";
 const DOC_MIME = "application/vnd.google-apps.document";

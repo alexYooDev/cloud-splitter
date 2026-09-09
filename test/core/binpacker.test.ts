@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { planZipParts } from "./binpacker.js";
-import type { CloudFile } from "./types.js";
+import { planZipParts } from "../../src/core/binpacker.js";
+import type { CloudFile } from "../../src/core/types.js";
 
 function mkFile(name: string, mb: number): CloudFile {
   return { id: name, name, relativePath: name, sizeBytes: mb * 1024 * 1024, mimeType: "application/octet-stream" };

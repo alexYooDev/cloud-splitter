@@ -72,9 +72,10 @@ src/
     binpacker.ts    # Sequential bin-packing into size-bounded ZIP parts
     downloader.ts   # Streaming download + ZIP-split engine
     retry.ts        # Exponential backoff for transient Drive API failures
-    *.test.ts       # Vitest unit tests, colocated with the module they cover
   cli/
     index.ts        # commander entry point
+test/
+  core/          # Vitest unit tests, mirroring src/core/ — one file per module
 ```
 
 ## Development
@@ -89,4 +90,6 @@ npm run test:watch   # run tests in watch mode
 
 ## Testing
 
-Unit tests mock the Google API client (`vi.mock("googleapis")`) so they run offline, with no real Drive folder or OAuth credentials needed. `downloader.test.ts` streams fake data through the real `archiver`/filesystem pipeline and reads the resulting ZIPs back with `yauzl` to verify byte-exact contents, correct split boundaries, oversized-file handling, resumability (rerunning skips completed parts), and that a mid-part failure leaves no stray `.tmp` file behind while earlier completed parts stay intact.
+Tests live under `test/`, mirroring `src/`'s structure, and import the source they cover by relative path (e.g. `test/core/downloader.test.ts` imports `../../src/core/downloader.js`). They mock the Google API client (`vi.mock("googleapis")`) so they run offline, with no real Drive folder or OAuth credentials needed. `downloader.test.ts` streams fake data through the real `archiver`/filesystem pipeline and reads the resulting ZIPs back with `yauzl` to verify byte-exact contents, correct split boundaries, oversized-file handling, resumability (rerunning skips completed parts), and that a mid-part failure leaves no stray `.tmp` file behind while earlier completed parts stay intact.
+
+`npm run typecheck` uses `tsconfig.test.json` (which extends the base config to also include `test/**/*`) so both source and tests get typechecked, while `npm run build` still uses the base `tsconfig.json` scoped to `src/` only — keeping `dist/` free of test output.

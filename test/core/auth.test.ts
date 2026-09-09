@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { getAuthorizedClient } from "./auth.js";
+import { getAuthorizedClient } from "../../src/core/auth.js";
 
 describe("getAuthorizedClient", () => {
   afterEach(() => {
