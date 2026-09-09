@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { Command } from "commander";
+import cliProgress from "cli-progress";
 import { getAuthorizedClient } from "../core/auth.js";
 import { scanTarget } from "../core/scanner.js";
 import { planZipParts } from "../core/binpacker.js";
@@ -91,35 +92,72 @@ program
       destinationDir: opts.output,
     });
 
+    const totalBytes = files.reduce((sum, f) => sum + f.sizeBytes, 0);
+    const multibar = new cliProgress.MultiBar(
+      {
+        clearOnComplete: false,
+        hideCursor: true,
+        emptyOnZero: true,
+        // We drive our own SIGINT handling below (letting the in-flight file
+        // finish before stopping); cli-progress's built-in SIGINT handler
+        // would race it, so it's disabled and we call multibar.stop()
+        // ourselves in every exit path instead.
+        gracefulExit: false,
+        format: " {bar} | {percentage}% | {value}/{total} | {label}",
+      },
+      cliProgress.Presets.shades_classic
+    );
+    const overallBar = multibar.create(totalBytes, 0, { label: "Overall" });
+    let currentFileBar: import("cli-progress").SingleBar | null = null;
+    let completedBytes = 0;
+    let stopped = false;
+    const stopBars = () => {
+      if (stopped) return;
+      stopped = true;
+      multibar.stop();
+    };
+
     downloader.on("plan:complete", ({ partCount }) => {
-      console.log(`Planned ${partCount} part(s)`);
+      multibar.log(`Planned ${partCount} part(s)\n`);
     });
     downloader.on("part:start", ({ partIndex, totalParts }) => {
-      console.log(`\nPart ${partIndex}/${totalParts}: starting`);
+      multibar.log(`\nPart ${partIndex}/${totalParts}: starting\n`);
     });
-    downloader.on("file:start", ({ name }) => {
-      process.stdout.write(`  ${name} ... `);
+    downloader.on("file:start", ({ name, fileId }) => {
+      const file = files.find((f) => f.id === fileId);
+      currentFileBar = multibar.create(file?.sizeBytes ?? 0, 0, { label: name });
     });
-    downloader.on("file:complete", () => {
-      process.stdout.write("done\n");
+    downloader.on("file:progress", ({ bytesWritten }) => {
+      currentFileBar?.update(bytesWritten);
+      overallBar.update(completedBytes + bytesWritten);
+    });
+    downloader.on("file:complete", ({ fileId }) => {
+      const file = files.find((f) => f.id === fileId);
+      completedBytes += file?.sizeBytes ?? 0;
+      overallBar.update(completedBytes);
+      if (currentFileBar) {
+        multibar.remove(currentFileBar);
+        currentFileBar = null;
+      }
     });
     downloader.on("file:retry", ({ message }) => {
-      console.log(`\n  ! ${message}`);
+      multibar.log(`  ! ${message}\n`);
     });
     downloader.on("file:warning", ({ message }) => {
-      console.log(`  ! ${message}`);
+      multibar.log(`  ! ${message}\n`);
     });
     downloader.on("part:complete", ({ partIndex, sizeBytes, outputPath }) => {
-      console.log(`Part ${partIndex} complete: ${(sizeBytes / 1024 / 1024).toFixed(2)} MB -> ${outputPath}`);
+      multibar.log(`Part ${partIndex} complete: ${(sizeBytes / 1024 / 1024).toFixed(2)} MB -> ${outputPath}\n`);
     });
 
     let interruptCount = 0;
     const onSigint = () => {
       interruptCount++;
       if (interruptCount === 1) {
-        console.log("\nInterrupting after the current file finishes (press Ctrl+C again to force quit)...");
+        multibar.log("\nInterrupting after the current file finishes (press Ctrl+C again to force quit)...\n");
         downloader.cancel();
       } else {
+        stopBars();
         console.log("\nForce quitting — the in-progress part's .tmp file may be left behind, but is safely ignored on the next run.");
         process.exit(130);
       }
@@ -128,8 +166,10 @@ program
 
     try {
       await downloader.run(files);
+      stopBars();
       console.log("\nDownload complete.");
     } catch (err) {
+      stopBars();
       if (err instanceof DownloadCancelledError) {
         console.log("\nInterrupted. Completed parts are saved in place — rerun this same command to resume.");
         process.exitCode = 130;
@@ -138,6 +178,7 @@ program
       throw err;
     } finally {
       process.off("SIGINT", onSigint);
+      stopBars();
     }
   });
 

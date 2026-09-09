@@ -50,10 +50,11 @@ npm run dev -- scan -f <id>
 # Preview how it would be split into ZIP parts, without downloading
 npm run dev -- plan -f <id> -s 4000
 
-# Stream it down as split ZIP parts (resumable — rerun to pick up where a
-# failed download left off). Press Ctrl+C to stop gracefully: the file
-# currently in flight finishes, its part is safely discarded, and
-# rerunning the same command resumes from the last completed part.
+# Stream it down as split ZIP parts, with a live overall + per-file
+# progress bar. Resumable — rerun to pick up where a failed download
+# left off. Press Ctrl+C to stop gracefully: the file currently in
+# flight finishes, its part is safely discarded, and rerunning the
+# same command resumes from the last completed part.
 npm run dev -- download -f <id> -o ./downloads -s 4000
 ```
 
